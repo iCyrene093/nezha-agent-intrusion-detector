@@ -22,6 +22,25 @@ sudo bash nezha_agent_intrusion_detector.sh
 sudo LOG_ROOT=/root/nezha-check bash nezha_agent_intrusion_detector.sh
 ```
 
+如需完整保留 SSH `authorized_keys` 原文等敏感配置，可显式开启：
+
+```bash
+sudo FULL_SENSITIVE=1 bash nezha_agent_intrusion_detector.sh
+```
+
+默认情况下，脚本会对 `authorized_keys` 的 key body 和 comment 做脱敏摘要，降低报告外传时的敏感信息暴露风险。
+
+## 依赖与降级行为
+
+脚本依赖常见 Linux 基础命令，例如 `bash`、`find`、`ps`、`grep`、`awk`、`sed`、`wc`、`mount`、`df`、`date`、`hostname`。
+
+以下命令为可选增强项，缺失时脚本会跳过对应采集并在摘要中显示 collection warning：
+
+- `systemctl` / `journalctl`：systemd 服务和 journal 日志。
+- `ss` 或 `netstat`：网络连接。
+- `ip`：路由和地址。
+- `iptables-save` / `iptables`、`nft`：防火墙规则。
+
 ## 检查内容
 
 脚本只做只读采集和启发式分析，不会清理、删除或阻断任何进程/连接。主要检查：
@@ -53,5 +72,7 @@ sudo LOG_ROOT=/root/nezha-check bash nezha_agent_intrusion_detector.sh
 ## 注意事项
 
 - 建议使用 root 运行，否则部分进程、网络连接、日志和 systemd 信息可能不可见。
+- 报告和 raw 证据可能包含主机名、用户名、IP 地址、进程参数、shell 配置、cron/systemd 内容等敏感运维信息；请限制目录权限，不要直接公开上传。
+- 默认会脱敏 `authorized_keys` 的密钥正文和注释；如需完整取证，请设置 `FULL_SENSITIVE=1` 并妥善保护输出目录。
 - 启发式分析不能替代完整取证；高风险主机建议先隔离、保全镜像和日志，再进行清理或重装。
 - 如果发现对外攻击迹象，请优先从云厂商安全组/防火墙限制出站流量，避免证据被破坏。
