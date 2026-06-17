@@ -20,6 +20,7 @@ CRITICAL_FINDINGS=0
 HIGH_FINDINGS=0
 MEDIUM_FINDINGS=0
 LOW_FINDINGS=0
+COLLECTION_WARNINGS_FILE="$REPORT_DIR/collection_warnings.tsv"
 
 mkdir -p "$RAW_DIR" 2>/dev/null || {
   REPORT_DIR="/tmp/nezha-agent-intrusion-detector/${HOSTNAME_SAFE:-host}-$TIMESTAMP"
@@ -27,6 +28,7 @@ mkdir -p "$RAW_DIR" 2>/dev/null || {
   REPORT_FILE="$REPORT_DIR/report.txt"
   SUMMARY_FILE="$REPORT_DIR/summary.txt"
   FINDINGS_FILE="$REPORT_DIR/findings.tsv"
+  COLLECTION_WARNINGS_FILE="$REPORT_DIR/collection_warnings.tsv"
   mkdir -p "$RAW_DIR" || {
     echo "ERROR: cannot create log directory" >&2
     exit 1
@@ -35,6 +37,7 @@ mkdir -p "$RAW_DIR" 2>/dev/null || {
 : >"$REPORT_FILE"
 : >"$SUMMARY_FILE"
 : >"$FINDINGS_FILE"
+: >"$COLLECTION_WARNINGS_FILE"
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T %z')" "$*" | tee -a "$REPORT_FILE"
@@ -48,6 +51,12 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+record_collection_warning() {
+  local name="$1"
+  local reason="$2"
+  printf '%s\t%s\n' "$name" "$reason" >>"$COLLECTION_WARNINGS_FILE"
+}
+
 run_capture() {
   local name="$1"
   shift
@@ -59,6 +68,12 @@ run_capture() {
     "$@"
   } >"$outfile" 2>&1
   local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    record_collection_warning "$name" "command returned rc=$rc"
+  fi
+  if [ ! -s "$outfile" ]; then
+    record_collection_warning "$name" "command produced no output"
+  fi
   printf '\n--- %s (rc=%s) ---\n' "$name" "$rc" >>"$REPORT_FILE"
   sed -n '1,220p' "$outfile" >>"$REPORT_FILE"
   local lines
@@ -88,8 +103,20 @@ add_finding() {
 safe_grep_count() {
   local pattern="$1"
   shift
-  local files=("$@")
-  grep -Ehi -- "$pattern" "${files[@]}" 2>/dev/null | grep -Ev '^\$' | wc -l | tr -d " " || true
+  local readable_files=()
+  local file
+  for file in "$@"; do
+    if [ -r "$file" ]; then
+      readable_files+=("$file")
+    else
+      record_collection_warning "analysis_input" "missing or unreadable file: $file"
+    fi
+  done
+  if [ "${#readable_files[@]}" -eq 0 ]; then
+    printf '0\n'
+    return 0
+  fi
+  grep -Ehi -- "$pattern" "${readable_files[@]}" 2>/dev/null | grep -Ev '^\$' | wc -l | tr -d " " || true
 }
 
 collect_baseline() {
@@ -122,7 +149,11 @@ collect_persistence() {
   run_capture crontab_root sh -c "crontab -l 2>/dev/null || true"
   run_capture cron_files sh -c "find /etc/cron* /var/spool/cron /var/spool/cron/crontabs -type f -maxdepth 3 -print -exec sed -n '1,160p' {} \; 2>/dev/null"
   run_capture systemd_services sh -c "find /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system -maxdepth 2 -type f \( -name '*.service' -o -name '*.timer' \) -mtime -30 -print -exec sed -n '1,120p' {} \; 2>/dev/null"
-  run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' -o -name 'authorized_keys' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null"
+  if [ "${FULL_SENSITIVE:-0}" = "1" ]; then
+    run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' -o -name 'authorized_keys' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null"
+  else
+    run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null; find /root /home -maxdepth 3 -type f -name 'authorized_keys' -print -exec awk '{printf \"key_type=%s key_body=%s comment=%s\\n\", \\$1, \"redacted\", length(\\$3)?\"present\":\"absent\"}' {} \; 2>/dev/null"
+  fi
   run_capture suid_recent sh -c "find / -xdev -perm -4000 -type f -printf '%TY-%Tm-%Td %TT %p\n' 2>/dev/null | sort"
 }
 
@@ -131,13 +162,27 @@ collect_network() {
   if have_cmd ss; then
     run_capture ss_all ss -tunap
     run_capture ss_summary ss -s
-  else
+  elif have_cmd netstat; then
     run_capture netstat_all netstat -tunap
+  else
+    record_collection_warning "network_connections" "neither ss nor netstat found; connection evidence skipped"
   fi
-  run_capture route ip route
-  run_capture addr ip addr
-  run_capture iptables sh -c "iptables-save 2>/dev/null || iptables -S 2>/dev/null || true"
-  run_capture nftables sh -c "nft list ruleset 2>/dev/null || true"
+  if have_cmd ip; then
+    run_capture route ip route
+    run_capture addr ip addr
+  else
+    record_collection_warning "ip" "command not found; route and address evidence skipped"
+  fi
+  if have_cmd iptables-save || have_cmd iptables; then
+    run_capture iptables sh -c "iptables-save 2>/dev/null || iptables -S 2>/dev/null || true"
+  else
+    record_collection_warning "iptables" "command not found; iptables rules skipped"
+  fi
+  if have_cmd nft; then
+    run_capture nftables sh -c "nft list ruleset 2>/dev/null || true"
+  else
+    record_collection_warning "nft" "command not found; nftables rules skipped"
+  fi
   run_capture dns_config sh -c "cat /etc/resolv.conf 2>/dev/null; printf '\n--- hosts ---\n'; cat /etc/hosts 2>/dev/null"
   run_capture conntrack_count sh -c "wc -l /proc/net/nf_conntrack /proc/net/ip_conntrack 2>/dev/null || true"
 }
@@ -163,9 +208,10 @@ analyze_results() {
   local ps_file="$RAW_DIR/top_processes.txt"
   local net_file="$RAW_DIR/ss_all.txt"
   [ -f "$net_file" ] || net_file="$RAW_DIR/netstat_all.txt"
+  [ -f "$net_file" ] || net_file="/dev/null"
 
   local malware_hits
-  malware_hits=$(safe_grep_count 'xmrig|kinsing|kdevtmpfsi|kinswap|watchbog|mirai|gafgyt|tsunami|pnscan|masscan|zmap|sshpass|miner|stratum\+tcp|pool\.' "$RAW_DIR"/*.txt)
+  malware_hits=$(safe_grep_count 'xmrig|kinsing|kdevtmpfsi|kinswap|watchbog|mirai|gafgyt|tsunami|pnscan|masscan|zmap|sshpass|miner|stratum\+tcp|pool\.' "$ps_file" "$net_file" "$RAW_DIR/known_malware_names.txt" "$RAW_DIR/journal_recent.txt" "$RAW_DIR/tmp_suspicious.txt" "$RAW_DIR/recent_exec.txt")
   [ "${malware_hits:-0}" -gt 0 ] && add_finding CRITICAL 35 "IOC" "发现常见恶意程序/挖矿/扫描工具关键词" "匹配次数: $malware_hits"
 
   local tmp_exec_hits
@@ -181,8 +227,8 @@ analyze_results() {
   fi
 
   local scanner_hits
-  scanner_hits=$(safe_grep_count ':22|:23|:2323|:3389|:445|:6379|:8080|:80|:443' "$net_file")
-  [ "${scanner_hits:-0}" -gt 150 ] && add_finding HIGH 20 "Network" "大量连接涉及常见攻击/扫描端口" "端口匹配次数: $scanner_hits"
+  scanner_hits=$(awk '/ESTAB|ESTABLISHED|SYN-SENT/ && /:22|:23|:2323|:3389|:445|:6379|:8080/ {print}' "$net_file" 2>/dev/null | wc -l | tr -d ' ')
+  [ "${scanner_hits:-0}" -gt 150 ] && add_finding HIGH 20 "Network" "大量连接涉及常见管理/数据库/代理端口，疑似扫描或爆破" "端口匹配次数: $scanner_hits"
 
   local suspicious_persistence
   suspicious_persistence=$(safe_grep_count 'curl|wget|bash -c|base64|/tmp/|/dev/shm|nc |ncat|socat|python -c|perl -e|chmod \+x|xmrig|kinsing|masscan|zmap' "$RAW_DIR"/cron_files.txt "$RAW_DIR"/systemd_services.txt "$RAW_DIR"/shell_profiles.txt)
@@ -204,6 +250,11 @@ analyze_results() {
     echo "Report directory: $REPORT_DIR"
     echo "Risk score: $SUSPICIOUS_SCORE"
     echo "Findings: CRITICAL=$CRITICAL_FINDINGS HIGH=$HIGH_FINDINGS MEDIUM=$MEDIUM_FINDINGS LOW=$LOW_FINDINGS"
+    if [ -s "$COLLECTION_WARNINGS_FILE" ]; then
+      echo "Collection warnings: $(wc -l <"$COLLECTION_WARNINGS_FILE" | tr -d ' ')"
+    else
+      echo "Collection warnings: 0"
+    fi
     if [ "$SUSPICIOUS_SCORE" -ge 60 ] || [ "$CRITICAL_FINDINGS" -gt 0 ]; then
       echo "Conclusion: 高风险。建议立即隔离主机、保全日志和镜像、轮换 Nezha/SSH/API 密钥，并人工复核 raw 日志。"
     elif [ "$SUSPICIOUS_SCORE" -ge 30 ]; then
@@ -221,9 +272,20 @@ analyze_results() {
       echo "- No heuristic findings."
     fi
     echo
+    if [ -s "$COLLECTION_WARNINGS_FILE" ]; then
+      echo "Collection warnings:"
+      awk -F '\t' '{printf "- %s: %s\n", $1, $2}' "$COLLECTION_WARNINGS_FILE" | head -20
+      echo
+    fi
     echo "Suggested next steps:"
     echo "1. 若风险为中/高，先在云防火墙限制出站，只保留必要管理 IP。"
-    echo "2. 复核 $RAW_DIR/ss_all.txt、top_processes.txt、cron_files.txt、systemd_services.txt。"
+    if [ -f "$RAW_DIR/ss_all.txt" ]; then
+      echo "2. 复核 $RAW_DIR/ss_all.txt、top_processes.txt、cron_files.txt、systemd_services.txt。"
+    elif [ -f "$RAW_DIR/netstat_all.txt" ]; then
+      echo "2. 复核 $RAW_DIR/netstat_all.txt、top_processes.txt、cron_files.txt、systemd_services.txt。"
+    else
+      echo "2. 复核 $RAW_DIR/top_processes.txt、cron_files.txt、systemd_services.txt；网络连接证据未采集成功时请补装 ss 或 netstat 后重跑。"
+    fi
     echo "3. 对可疑 PID 执行只读取证：readlink -f /proc/PID/exe; ls -l /proc/PID/fd; cat /proc/PID/cmdline。"
     echo "4. 升级/重装可信 Nezha agent，轮换 dashboard 通信密钥和 SSH 凭据。"
   } | tee "$SUMMARY_FILE" | tee -a "$REPORT_FILE"
