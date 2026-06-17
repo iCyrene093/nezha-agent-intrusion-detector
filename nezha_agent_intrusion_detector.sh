@@ -8,6 +8,7 @@ set -o pipefail
 VERSION="1.0.0"
 DEFAULT_LOG_ROOT="/var/log/nezha-agent-intrusion-detector"
 LOG_ROOT="${LOG_ROOT:-$DEFAULT_LOG_ROOT}"
+umask 077
 TIMESTAMP="$(date '+%Y%m%d-%H%M%S')"
 HOSTNAME_SAFE="$(hostname 2>/dev/null | tr -cs 'A-Za-z0-9_.-' '_' | sed 's/_$//')"
 REPORT_DIR="${REPORT_DIR:-$LOG_ROOT/${HOSTNAME_SAFE:-host}-$TIMESTAMP}"
@@ -34,6 +35,7 @@ mkdir -p "$RAW_DIR" 2>/dev/null || {
     exit 1
   }
 }
+chmod 700 "$REPORT_DIR" "$RAW_DIR" 2>/dev/null || true
 : >"$REPORT_FILE"
 : >"$SUMMARY_FILE"
 : >"$FINDINGS_FILE"
@@ -108,7 +110,7 @@ safe_grep_count() {
   for file in "$@"; do
     if [ -r "$file" ]; then
       readable_files+=("$file")
-    else
+    elif [ -e "$file" ]; then
       record_collection_warning "analysis_input" "missing or unreadable file: $file"
     fi
   done
@@ -139,20 +141,26 @@ collect_nezha_context() {
   if have_cmd systemctl; then
     run_capture nezha_service systemctl status nezha-agent --no-pager -l
     run_capture failed_units systemctl --failed --no-pager
+  else
+    record_collection_warning "systemctl" "command not found; systemd service evidence skipped"
   fi
   run_capture nezha_processes sh -c "ps auxww | grep -Ei '[n]ezha|[a]gent'"
-  run_capture nezha_files sh -c "find /opt /etc /usr/local /var/lib -maxdepth 4 \( -iname '*nezha*' -o -iname '*agent*' \) -print 2>/dev/null | head -300"
+  run_capture nezha_files sh -c "find /opt /etc /usr/local /var/lib -maxdepth 4 \( -iname '*nezha*' -o -iname '*agent*' \) -print 2>/dev/null | head -300 || true"
 }
 
 collect_persistence() {
   section "持久化与定时任务 / Persistence"
-  run_capture crontab_root sh -c "crontab -l 2>/dev/null || true"
-  run_capture cron_files sh -c "find /etc/cron* /var/spool/cron /var/spool/cron/crontabs -type f -maxdepth 3 -print -exec sed -n '1,160p' {} \; 2>/dev/null"
-  run_capture systemd_services sh -c "find /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system -maxdepth 2 -type f \( -name '*.service' -o -name '*.timer' \) -mtime -30 -print -exec sed -n '1,120p' {} \; 2>/dev/null"
-  if [ "${FULL_SENSITIVE:-0}" = "1" ]; then
-    run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' -o -name 'authorized_keys' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null"
+  if have_cmd crontab; then
+    run_capture crontab_root sh -c "crontab -l 2>/dev/null || true"
   else
-    run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null; find /root /home -maxdepth 3 -type f -name 'authorized_keys' -print -exec awk '{printf \"key_type=%s key_body=%s comment=%s\\n\", \\$1, \"redacted\", length(\\$3)?\"present\":\"absent\"}' {} \; 2>/dev/null"
+    record_collection_warning "crontab" "command not found; root crontab evidence skipped"
+  fi
+  run_capture cron_files sh -c "find /etc/cron* /var/spool/cron /var/spool/cron/crontabs -maxdepth 3 -type f -print -exec sed -n '1,160p' {} \; 2>/dev/null || true"
+  run_capture systemd_services sh -c "find /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system -maxdepth 2 -type f \( -name '*.service' -o -name '*.timer' \) -mtime -30 -print -exec sed -n '1,120p' {} \; 2>/dev/null || true"
+  if [ "${FULL_SENSITIVE:-0}" = "1" ]; then
+    run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' -o -name 'authorized_keys' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null || true"
+  else
+    run_capture shell_profiles sh -c "find /root /home -maxdepth 3 -type f \( -name '.bashrc' -o -name '.profile' -o -name '.bash_profile' -o -name '.zshrc' \) -print -exec sed -n '1,120p' {} \; 2>/dev/null || true; find /root /home -maxdepth 3 -type f -name 'authorized_keys' -print -exec awk '{printf \"key_type=%s key_body=%s comment=%s\\n\", \\$1, \"redacted\", length(\\$3)?\"present\":\"absent\"}' {} \; 2>/dev/null || true"
   fi
   run_capture suid_recent sh -c "find / -xdev -perm -4000 -type f -printf '%TY-%Tm-%Td %TT %p\n' 2>/dev/null | sort"
 }
