@@ -5,7 +5,7 @@
 ## 快速使用
 
 ```bash
-sudo bash nezha_agent_intrusion_detector.sh
+curl -fsSL https://raw.githubusercontent.com/iCyrene093/nezha-agent-intrusion-detector/main/nezha_agent_intrusion_detector.sh | sudo bash
 ```
 
 脚本默认会把详细日志保存到：
@@ -19,13 +19,13 @@ sudo bash nezha_agent_intrusion_detector.sh
 也可以自定义输出目录：
 
 ```bash
-sudo LOG_ROOT=/root/nezha-check bash nezha_agent_intrusion_detector.sh
+curl -fsSL https://raw.githubusercontent.com/iCyrene093/nezha-agent-intrusion-detector/main/nezha_agent_intrusion_detector.sh | sudo LOG_ROOT=/root/nezha-check bash
 ```
 
 如需完整保留 SSH `authorized_keys` 原文等敏感配置，可显式开启：
 
 ```bash
-sudo FULL_SENSITIVE=1 bash nezha_agent_intrusion_detector.sh
+curl -fsSL https://raw.githubusercontent.com/iCyrene093/nezha-agent-intrusion-detector/main/nezha_agent_intrusion_detector.sh | sudo FULL_SENSITIVE=1 bash
 ```
 
 默认情况下，脚本会对 `authorized_keys` 的 key body 和 comment 做脱敏摘要，降低报告外传时的敏感信息暴露风险。
