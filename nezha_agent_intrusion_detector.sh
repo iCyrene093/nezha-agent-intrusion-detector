@@ -121,6 +121,30 @@ safe_grep_count() {
   grep -Ehi -- "$pattern" "${readable_files[@]}" 2>/dev/null | grep -Ev '^\$' | wc -l | tr -d " " || true
 }
 
+count_temp_dir_processes() {
+  local ps_file="$1"
+  if [ ! -r "$ps_file" ]; then
+    printf '0\n'
+    return 0
+  fi
+  awk '
+    NR == 1 { next }
+    {
+      cmd = ""
+      for (i = 11; i <= NF; i++) {
+        cmd = cmd (cmd ? " " : "") $i
+      }
+      if (cmd ~ /nezha_agent_intrusion_detector\.sh/) {
+        next
+      }
+      if (cmd ~ /(^|[[:space:]])(\/tmp|\/var\/tmp|\/dev\/shm)\/[^[:space:]]+/) {
+        count++
+      }
+    }
+    END { print count + 0 }
+  ' "$ps_file" 2>/dev/null || printf '0\n'
+}
+
 collect_baseline() {
   section "基础信息 / Baseline"
   log "Nezha Agent Intrusion Detector v$VERSION"
@@ -223,7 +247,7 @@ analyze_results() {
   [ "${malware_hits:-0}" -gt 0 ] && add_finding CRITICAL 35 "IOC" "发现常见恶意程序/挖矿/扫描工具关键词" "匹配次数: $malware_hits"
 
   local tmp_exec_hits
-  tmp_exec_hits=$(safe_grep_count '/tmp/|/var/tmp/|/dev/shm/' "$ps_file")
+  tmp_exec_hits=$(count_temp_dir_processes "$ps_file")
   [ "${tmp_exec_hits:-0}" -gt 0 ] && add_finding HIGH 25 "Process" "存在从临时目录运行的进程，常见于入侵后载荷" "进程匹配次数: $tmp_exec_hits"
 
   local outbound_many
